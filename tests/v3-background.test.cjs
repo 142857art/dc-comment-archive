@@ -8,6 +8,7 @@ const key = 'mgallery:example:123';
 const writer = { id: 'extension-test', url: 'https://gall.dcinside.com/mgallery/board/write/?id=example', tab: { id: 1 }, frameId: 0, documentId: 'write-document-1' };
 const page = { ...writer, url };
 const ui = { id: 'extension-test', url: 'chrome-extension://extension-test/archive.html' };
+const offscreen = { id: 'extension-test', url: 'chrome-extension://extension-test/offscreen.html' };
 const tick = async () => { for (let i = 0; i < 12; i++) await new Promise(resolve => setImmediate(resolve)); };
 
 function background(initial = {}, collector) {
@@ -19,6 +20,7 @@ function background(initial = {}, collector) {
   const notices = [];
   let now = Date.parse('2026-10-16T00:00:00Z');
   let failArchiveWrite = false;
+  let failTargetWrite = false;
   const event = name => ({ addListener: fn => { listeners[name] = fn; } });
   const chrome = {
     runtime: { id: 'extension-test', getURL: p => `chrome-extension://extension-test/${p}`,
@@ -42,6 +44,7 @@ function background(initial = {}, collector) {
       },
       set: async values => {
         if (failArchiveWrite && Object.keys(values).some(k => k.startsWith('post:'))) { failArchiveWrite = false; throw new Error('QUOTA_BYTES quota exceeded'); }
+        if (failTargetWrite && Object.keys(values).some(k => k.startsWith('target:'))) { failTargetWrite = false; throw new Error('target storage failed'); }
         Object.assign(data, structuredClone(values));
       },
       remove: async keys => { for (const k of Array.isArray(keys) ? keys : [keys]) delete data[k]; },
@@ -55,6 +58,7 @@ function background(initial = {}, collector) {
   vm.runInContext(script('background.js'), context, { filename: 'background.js' });
   return { data, calls, collections, notices, alarms, listeners, context,
     failArchiveWrite: () => { failArchiveWrite = true; },
+    failTargetWrite: () => { failTargetWrite = true; },
     advance: ms => { now += ms; },
     send: (message, sender = page) => new Promise(resolve => {
       assert.equal(listeners.message(message, sender, value => resolve(structuredClone(value))), true);
@@ -394,4 +398,134 @@ test('increasing idle setting cannot revive a target whose deadline passed befor
   assert.equal(app.alarms.size, 0);
   await app.alarm();
   assert.equal(app.collections.length, 0);
+});
+
+const probeRequest = job => ({ type: 'RESERVE_DELETION_PROBE', key: job.key, generation: job.generation, attemptAt: job.attemptAt });
+
+test('collection jobs retain post metadata and identify their current claim', async () => {
+  const app = background({ settings: { ...settings, allOwnPosts: true } }, () => alive(0));
+  await app.send({ type: 'POST_SEEN', post: metadata, count: 0 });
+  const target = app.data[`target:${key}`];
+  app.advance(30001); await app.alarm();
+  const job = app.collections[0];
+  assert.equal(job.metadata.title, metadata.title);
+  assert.equal(job.metadata.authorUid, metadata.authorUid);
+  assert.equal(job.metadata.author, metadata.author);
+  assert.equal(job.metadata.gallery, metadata.gallery);
+  assert.equal(job.generation, target.generation);
+  assert.equal(job.attemptAt, app.data[`target:${key}`].lastAttemptAt);
+});
+
+test('only the current offscreen claim can durably reserve one deletion probe', async () => {
+  let release;
+  const app = background({ settings }, () => new Promise(resolve => { release = resolve; }));
+  await register(app);
+  app.advance(30001); await app.alarm();
+  const job = app.collections[0], request = probeRequest(job);
+  for (const sender of [page, ui, { ...offscreen, tab: { id: 1 } }, { ...offscreen, id: 'another-extension' }, { ...offscreen, url: `${offscreen.url}?spoof=1` }]) {
+    assert.notEqual((await app.send(request, sender)).reserved, true);
+  }
+  for (const stale of [{ generation: 'previous-generation' }, { attemptAt: job.attemptAt - 1 }, { key: key.replace(':123', ':124') }]) {
+    assert.notEqual((await app.send({ ...request, ...stale }, offscreen)).reserved, true);
+  }
+  const reserved = await app.send(request, offscreen);
+  assert.equal(reserved.ok, true);
+  assert.equal(reserved.reserved, true);
+  assert.equal(app.data[`target:${key}`].deletionProbeUsed, true, 'the persisted latch must exist before permission is returned');
+  assert.equal((await app.send(request, offscreen)).reserved, false);
+  release({ ok: false, error: 'HTTP 503 after reserving probe' }); await tick();
+  assert.equal(app.data[`target:${key}`].deletionProbeUsed, true);
+  assert.notEqual((await app.send(request, offscreen)).reserved, true, 'a completed collection no longer owns a running claim');
+});
+
+test('a failed collector and worker restart cannot spend the same deletion probe twice', async () => {
+  let release;
+  const first = background({ settings }, () => new Promise(resolve => { release = resolve; }));
+  const target = await register(first);
+  first.advance(30001); await first.alarm();
+  assert.equal((await first.send(probeRequest(first.collections[0]), offscreen)).reserved, true);
+  release({ ok: false, error: 'connection closed' }); await tick();
+  assert.equal(first.data[`target:${key}`].expiresAt, target.expiresAt);
+  let restartedRelease;
+  const restarted = background(first.data, () => new Promise(resolve => { restartedRelease = resolve; }));
+  await tick();
+  restarted.advance(60002); await restarted.alarm();
+  assert.equal(restarted.collections.length, 1);
+  assert.equal((await restarted.send(probeRequest(restarted.collections[0]), offscreen)).reserved, false);
+  assert.equal(restarted.data[`target:${key}`].expiresAt, target.expiresAt);
+  restartedRelease(alive(0)); await tick();
+});
+
+test('failed reservation persistence grants no probe and concurrent retries grant only one', async () => {
+  let release;
+  const app = background({ settings }, () => new Promise(resolve => { release = resolve; }));
+  await register(app);
+  app.advance(30001); await app.alarm();
+  const request = probeRequest(app.collections[0]);
+  app.failTargetWrite();
+  const failure = await app.send(request, offscreen);
+  assert.equal(failure.ok, false);
+  assert.notEqual(failure.reserved, true);
+  assert.notEqual(app.data[`target:${key}`].deletionProbeUsed, true);
+  const retries = await Promise.all([app.send(request, offscreen), app.send(request, offscreen)]);
+  assert.deepEqual(retries.map(response => response.reserved), [true, false]);
+  assert.equal(app.data[`target:${key}`].deletionProbeUsed, true);
+  release(alive(0)); await tick();
+});
+
+test('stopped and expired targets cannot reserve a deletion confirmation request', async () => {
+  for (const invalidation of ['stopped', 'expired', 'lease-expired']) {
+    let release;
+    const app = background({ settings }, () => new Promise(resolve => { release = resolve; }));
+    await register(app);
+    app.advance(30001); await app.alarm();
+    const request = probeRequest(app.collections[0]);
+    if (invalidation === 'stopped') await app.send({ type: 'STOP_TARGET', key }, ui);
+    else app.advance(invalidation === 'expired' ? 600001 : 120001);
+    assert.notEqual((await app.send(request, offscreen)).reserved, true, invalidation);
+    assert.notEqual(app.data[`target:${key}`].deletionProbeUsed, true);
+    release(alive(0)); await tick();
+  }
+});
+
+test('fresh list presence resets the probe latch and monitoring state survives without extending idle time', async () => {
+  let release;
+  const app = background({ settings }, () => new Promise(resolve => { release = resolve; }));
+  const target = await register(app);
+  app.advance(30001); await app.alarm();
+  assert.equal((await app.send(probeRequest(app.collections[0]), offscreen)).reserved, true);
+  const monitorState = { listPage: 2, missing: 0, nextListCheckAt: target.createdAt + 90000 };
+  release({ ...alive(0), result: { ...alive(0).result, resetDeletionProbe: true, monitorState } }); await tick();
+  assert.equal(app.data[`target:${key}`].deletionProbeUsed, false);
+  assert.deepEqual(app.data[`target:${key}`].monitorState, monitorState);
+  assert.equal(app.data[`target:${key}`].expiresAt, target.expiresAt);
+  app.advance(30001); await app.alarm();
+  assert.deepEqual(app.collections[1].monitorState, monitorState);
+  assert.equal((await app.send(probeRequest(app.collections[1]), offscreen)).reserved, true);
+  release(alive(0)); await tick();
+  assert.equal(app.data[`target:${key}`].expiresAt, target.expiresAt);
+});
+
+test('comments collected immediately before confirmed deletion are archived before its notification', async () => {
+  let result = alive(1, [comment(1)]);
+  const app = background({ settings }, () => result);
+  await register(app);
+  app.advance(30001); await app.alarm();
+  result = { ok: true, result: { state: 'deleted', metadata, count: 2, comments: [comment(2)], complete: true } };
+  app.advance(30001); await app.alarm();
+  assert.equal(app.data[`target:${key}`].status, 'deleted');
+  assert.deepEqual(app.data[`post:${key}`].comments.map(c => c.id), ['1', '2']);
+  const notice = await app.send({ type: 'GET_DELETION_NOTICES' });
+  assert.equal(notice.notices[0].count, 2);
+});
+
+test('listing monitoring errors preserve the three-second comment schedule and idle deadline', async () => {
+  const app = background({}, () => ({ ok: true, result: { ...alive(0).result, monitoringError: '목록 확인 실패' } }));
+  const target = await register(app);
+  app.advance(3000); await app.alarm();
+  assert.equal(app.data[`target:${key}`].lastError, '목록 확인 실패');
+  assert.equal(app.data[`target:${key}`].nextCheckAt, target.createdAt + 6000);
+  assert.equal(app.data[`target:${key}`].expiresAt, target.expiresAt);
+  app.advance(3000); await app.alarm();
+  assert.equal(app.collections.length, 2);
 });

@@ -1,6 +1,6 @@
 {
   "name": "dc-comment-archive",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "private": true,
   "type": "commonjs",
   "description": "Local comment archive for the user's DC Inside posts",

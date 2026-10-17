@@ -13,7 +13,11 @@
       return;
     }
     collecting = true;
-    DCCollector.collectTarget(message.job).then(
+    DCCollector.collectTarget(message.job, { reserveDeletionProbe: async () => {
+      const response = await chrome.runtime.sendMessage({ type: 'RESERVE_DELETION_PROBE', key: message.job.key,
+        generation: message.job.generation, attemptAt: message.job.attemptAt });
+      return response?.ok === true && response.reserved === true;
+    } }).then(
       result => { collecting = false; sendResponse({ ok: true, result }); },
       error => { collecting = false; sendResponse({ ok: false, error: error.message || '댓글을 수집하지 못했습니다.' }); }
     );

@@ -64,7 +64,8 @@ async function register(post, config, { manual = false, newlyWritten = false } =
   if (previous?.status === 'active' || (!manual && (previous || excluded))) return previous || null;
   const now = Date.now();
   const target = { ...identity, title: String(post.title || `글 ${identity.no}`).slice(0, 500),
-    expectedUid: newlyWritten ? '' : String(post.authorUid || ''), status: 'active', lastCount: newlyWritten ? 0 : null,
+    expectedUid: newlyWritten ? '' : String(post.authorUid || ''), author: String(post.author || '').slice(0, 200),
+    gallery: String(post.gallery || identity.galleryId).slice(0, 200), status: 'active', lastCount: newlyWritten ? 0 : null,
     createdAt: now, lastActivityAt: now, expiresAt: now + config.idleMinutes * 60000,
     nextCheckAt: now + config.pollSeconds * 1000, generation: `${now}:${++sequence}`, inFlightUntil: 0, lastError: '', needsCollection: false };
   await chrome.storage.local.set({ [tk(identity.key)]: target });
@@ -79,10 +80,12 @@ async function runTarget(key, force = false, scheduledAt) {
     if (now >= t.expiresAt) { await synchronize(); return null; }
     if (t.inFlightUntil > now || (!force && t.nextCheckAt > now)) return null;
     if (force && t.lastAttemptAt && now - t.lastAttemptAt < Math.min(config.pollSeconds, 5) * 1000) return null;
+    const archived = await get(pk(key));
     t.inFlightUntil = now + 120000; t.lastAttemptAt = now;
     await chrome.storage.local.set({ [tk(key)]: t });
     collecting = true;
-    return { ...t, force: force || t.needsCollection,
+    return { ...t, metadata: { ...identityMetadata(t),
+      author: t.author || archived?.author || '', authorUid: t.expectedUid || archived?.authorUid || '' }, force: force || t.needsCollection,
       scheduleBase: Number.isFinite(scheduledAt) ? Math.min(scheduledAt, now) : now };
   });
   if (!claim) return;
@@ -92,7 +95,9 @@ async function runTarget(key, force = false, scheduledAt) {
       await ensureOffscreen();
       response = await chrome.runtime.sendMessage({ target: 'offscreen', type: 'COLLECT_TARGET', job: {
         url: claim.url, key, lastCount: claim.lastCount, force: claim.force, expectedUid: claim.expectedUid,
-        nextPage: claim.nextPage, collectionCount: claim.collectionCount
+        nextPage: claim.nextPage, collectionCount: claim.collectionCount,
+        metadata: claim.metadata, monitorState: claim.monitorState,
+        generation: claim.generation, attemptAt: claim.lastAttemptAt
       } });
       if (!response?.ok) throw new Error(response?.error || '글을 확인하지 못했습니다.');
     } catch (error) { response = { ok: false, error: error.message }; }
@@ -109,20 +114,23 @@ async function runTarget(key, force = false, scheduledAt) {
       try {
         if (!response.ok) throw new Error(response.error);
         const result = response.result;
+        if (!['alive', 'deleted'].includes(result?.state)) throw new Error('댓글 수 응답이 올바르지 않습니다.');
+        if (result.state === 'alive' && (!Number.isInteger(result.count) || result.count < 0)) throw new Error('댓글 수 응답이 올바르지 않습니다.');
+        if (result.monitorState) t.monitorState = result.monitorState;
+        if (result.resetDeletionProbe === true) t.deletionProbeUsed = false;
+        if (Array.isArray(result.comments)) {
+          const snapshot = sanitizeSnapshot({ ...result.metadata, url: t.url, comments: result.comments }, t.url);
+          if (t.expectedUid && snapshot.authorUid !== t.expectedUid) throw new Error('글 작성자가 일치하지 않습니다.');
+          await chrome.storage.local.set({ [pk(key)]: mergePost(await get(pk(key)), snapshot) });
+        }
         if (result?.state === 'deleted') {
           t.status = 'deleted'; t.deletedAt = now; t.lastError = ''; notice = true;
           if (!await get(pk(key))) await chrome.storage.local.set({ [pk(key)]: mergePost(null, {
             ...parsePostUrl(t.url), title: t.title, author: '', authorUid: t.expectedUid, gallery: t.galleryId, comments: []
           }) });
         } else {
-          if (result?.state !== 'alive' || !Number.isInteger(result.count) || result.count < 0) throw new Error('댓글 수 응답이 올바르지 않습니다.');
-          if (Array.isArray(result.comments)) {
-            const snapshot = sanitizeSnapshot({ ...result.metadata, url: t.url, comments: result.comments }, t.url);
-            if (t.expectedUid && snapshot.authorUid !== t.expectedUid) throw new Error('글 작성자가 일치하지 않습니다.');
-            await chrome.storage.local.set({ [pk(key)]: mergePost(await get(pk(key)), snapshot) });
-          }
           if (result.count !== t.lastCount) { t.lastActivityAt = now; t.expiresAt = now + config.idleMinutes * 60000; }
-          t.lastCount = result.count; t.title = result.metadata?.title || t.title; t.lastError = ''; t.failures = 0;
+          t.lastCount = result.count; t.title = result.metadata?.title || t.title; t.lastError = String(result.monitoringError || '').slice(0, 300); t.failures = 0;
           t.needsCollection = result.complete === false; t.nextPage = result.nextPage || 1; t.collectionCount = result.collectionCount ?? result.count;
         }
       } catch (error) {
@@ -146,8 +154,25 @@ async function tick(scheduledAt = Date.now()) {
   } finally { ticking = false; }
 }
 function requestCheck(key, force) { void runTarget(key, force).catch(error => console.warn('디시 댓글 보관함:', error.message)); }
+function identityMetadata(t) {
+  return { ...parsePostUrl(t.url), title: t.title, gallery: t.gallery || t.galleryId };
+}
 async function handle(m, sender) {
   if (!m || typeof m.type !== 'string') throw new Error('올바르지 않은 요청입니다.');
+  if (m.type === 'RESERVE_DELETION_PROBE') {
+    if (sender.id !== chrome.runtime.id || sender.tab || sender.url !== chrome.runtime.getURL('offscreen.html') || !validKey(m.key)) {
+      throw new Error('허용되지 않은 삭제 확인 요청입니다.');
+    }
+    const t = await get(tk(m.key)), config = await settings(), now = Date.now();
+    if (!config.autoSave || !collecting || !t || t.status !== 'active' || now >= t.expiresAt ||
+        t.inFlightUntil <= now || t.generation !== m.generation || t.lastAttemptAt !== m.attemptAt || t.deletionProbeUsed) {
+      return { ok: true, reserved: false };
+    }
+    // Persist before authorizing the request: a failed fetch or worker restart must not repeat it.
+    t.deletionProbeUsed = true;
+    await chrome.storage.local.set({ [tk(t.key)]: t });
+    return { ok: true, reserved: true };
+  }
   const site = siteSender(sender), ui = uiSender(sender);
   if (!site && !ui) throw new Error('허용되지 않은 요청입니다.');
   const config = await settings();

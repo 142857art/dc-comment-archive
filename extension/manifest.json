@@ -3,7 +3,7 @@
   "name": "디시 댓글 보관함",
   "author": "Astra & 김우무문어",
   "description": "선택한 내 글의 댓글을 백그라운드에서 확인하고 이 브라우저에 보관합니다.",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "minimum_chrome_version": "120",
   "permissions": ["storage", "alarms", "offscreen"],
   "host_permissions": ["https://gall.dcinside.com/*"],
