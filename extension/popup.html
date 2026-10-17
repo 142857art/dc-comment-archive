@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>디시 댓글 보관함</title>
+  <link rel="stylesheet" href="ui.css">
+  <script src="popup.js" defer></script>
+</head>
+<body class="popup-page">
+  <main>
+    <header class="popup-header"><h1>디시 댓글 보관함</h1><button id="openArchive" class="primary">보관함 열기</button></header>
+    <form id="settingsForm" class="card settings">
+      <header class="settings-header"><h2>백업 설정</h2><button type="submit">설정 저장</button></header>
+      <label class="toggle"><input id="autoSave" type="checkbox">댓글 백업 사용</label>
+      <label class="toggle"><input id="allOwnPosts" type="checkbox">모든 내 글을 백업 대상으로 지정</label>
+      <label for="ownUid">내 갤로그 ID</label>
+      <input id="ownUid" type="text" autocomplete="off" spellcheck="false" maxlength="100" aria-label="내 갤로그 ID" aria-describedby="uidStatus" placeholder="갤로그 ID">
+      <p id="uidStatus" class="muted small" role="status">설정 확인 중</p>
+      <label for="pollSeconds">확인 간격 (초)</label>
+      <input id="pollSeconds" type="number" min="1" max="3600" step="1" required>
+      <label for="idleMinutes">댓글 수 무변화 시 종료 (분)</label>
+      <input id="idleMinutes" type="number" min="1" max="1440" step="1" required>
+    </form>
+    <section class="card target-card" aria-labelledby="targetsHeading">
+      <h2 id="targetsHeading">확인 중인 글</h2>
+      <div id="targetList"></div>
+    </section>
+    <footer class="popup-footer"><span id="storageSummary" class="muted"></span><span id="feedback" role="status" aria-live="polite"></span></footer>
+  </main>
+</body>
+</html>

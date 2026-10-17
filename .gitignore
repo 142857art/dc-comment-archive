@@ -1,0 +1,10 @@
+node_modules/
+.npm-cache/
+research/
+*.zip
+dc-comment-archive-v*/
+tests/browser/
+*.log
+.env
+.env.*
+!.env.example

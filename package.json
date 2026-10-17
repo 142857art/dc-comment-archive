@@ -1,0 +1,13 @@
+{
+  "name": "dc-comment-archive",
+  "version": "0.3.3",
+  "private": true,
+  "type": "commonjs",
+  "description": "Local comment archive for the user's DC Inside posts",
+  "scripts": {
+    "test": "node --test tests/*.test.cjs"
+  },
+  "devDependencies": {
+    "linkedom": "^0.18.12"
+  }
+}

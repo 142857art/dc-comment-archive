@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "디시 댓글 보관함",
+  "author": "Astra & 김우무문어",
+  "description": "선택한 내 글의 댓글을 백그라운드에서 확인하고 이 브라우저에 보관합니다.",
+  "version": "0.3.3",
+  "minimum_chrome_version": "120",
+  "permissions": ["storage", "alarms", "offscreen"],
+  "host_permissions": ["https://gall.dcinside.com/*"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "디시 댓글 보관함", "default_popup": "popup.html" },
+  "options_page": "archive.html",
+  "content_scripts": [{
+    "matches": ["https://gall.dcinside.com/board/write*", "https://gall.dcinside.com/mgallery/board/write*", "https://gall.dcinside.com/mini/board/write*", "https://gall.dcinside.com/person/board/write*"],
+    "js": ["write-bridge.js"],
+    "world": "MAIN",
+    "run_at": "document_start"
+  }, {
+    "matches": ["https://gall.dcinside.com/*"],
+    "js": ["core.js", "extractor.js", "notification-core.js", "content.js", "notifications.js", "writer.js", "site-ui.js"],
+    "css": ["site-ui.css"],
+    "run_at": "document_idle"
+  }]
+}

@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>디시 댓글 보관함</title>
+  <link rel="stylesheet" href="ui.css">
+  <script src="archive.js" defer></script>
+</head>
+<body class="archive-page">
+  <header class="archive-header">
+    <div><h1>디시 댓글 보관함</h1><p id="summary" class="muted"></p></div>
+    <button id="export" disabled>전체 JSON 내보내기</button>
+  </header>
+  <main class="archive-layout">
+    <aside class="post-sidebar" aria-label="저장한 글">
+      <label for="search" class="search-label">글·댓글 검색</label>
+      <input id="search" type="search" placeholder="제목, 작성자, 댓글" autocomplete="off">
+      <p id="resultsCount" class="muted" role="status"></p>
+      <div id="postList" class="post-list"></div>
+    </aside>
+    <section id="postDetail" class="post-detail" aria-label="저장한 댓글" aria-live="polite"><p class="empty-state">저장한 글이 없습니다.</p></section>
+  </main>
+  <p id="feedback" class="archive-feedback" role="status" aria-live="polite"></p>
+</body>
+</html>
